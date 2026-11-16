@@ -59,4 +59,30 @@ pool.query = async function retryingQuery(...args) {
   }
 };
 
+// Runs `callback` inside a BEGIN/COMMIT, rolling back on any error. Use this whenever a
+// single logical operation needs more than one write (e.g. creating a partner AND their
+// first share-history row, or generating a month's worth of settlement transfers) — a
+// crash or error partway through must not leave half the writes committed.
+//
+// This bypasses pool.query's retry wrapper on purpose: retrying one statement inside an
+// already-open transaction after a connection drop would silently continue inside a
+// transaction that's actually dead. If the connection drops mid-transaction, the whole
+// transaction is lost and must be retried as a whole (the caller can simply call
+// withTransaction again), not patched statement-by-statement.
+async function withTransaction(callback) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = pool;
+module.exports.withTransaction = withTransaction;

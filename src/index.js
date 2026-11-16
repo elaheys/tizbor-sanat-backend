@@ -29,6 +29,8 @@ const transactionsRouter = require('./routes/transactions');
 const loansRouter = require('./routes/loans');
 const customerAccountsRouter = require('./routes/customerAccounts');
 const reportsRouter = require('./routes/reports');
+const partnerLedgerRouter = require('./routes/partnerLedger');
+const invoicesRouter = require('./routes/invoices');
 
 const app = express();
 
@@ -77,6 +79,8 @@ app.use('/api/transactions', transactionsRouter);
 app.use('/api/loans', loansRouter);
 app.use('/api/customer-accounts', customerAccountsRouter);
 app.use('/api/reports', reportsRouter);
+app.use('/api/partner-ledger', partnerLedgerRouter);
+app.use('/api/invoices', invoicesRouter);
 
 // catch-all error handler — must be last. Without this, an uncaught error (like the
 // CORS rejection above) falls through to Express's default handler, which replies with

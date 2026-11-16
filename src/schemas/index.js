@@ -25,12 +25,21 @@ const createPartner = z.object({
 const updatePartner = z.object({
   name: z.string().min(1).optional(),
   role: z.enum(ROLES).optional(),
-  is_active: z.coerce.boolean().optional(),
+  // plain z.boolean(), NOT z.coerce.boolean() — coercion would turn the string "false"
+  // into `true` (JS's Boolean("false") is true), silently re-activating a partner that
+  // was meant to be deactivated. This is a JSON-only API, so the client always sends a
+  // real JSON boolean; there's no legitimate case that needs string coercion here.
+  is_active: z.boolean().optional(),
   share_percent: z.coerce.number().min(0).max(100).optional(),
 });
 
 const createCustomer = z.object({
   name: z.string().min(1, 'name is required'),
+  phone: z.string().min(1).optional(),
+});
+
+const updateCustomer = z.object({
+  name: z.string().min(1).optional(),
   phone: z.string().min(1).optional(),
 });
 
@@ -50,9 +59,24 @@ const createLoan = z.object({
   to_partner_id: z.coerce.number().int().positive(),
   amount: z.coerce.number().positive(),
   loan_date: z.string().optional(),
+  note: z.string().optional(),
 }).refine((data) => data.from_partner_id !== data.to_partner_id, {
   message: 'from_partner_id and to_partner_id must be different',
   path: ['to_partner_id'],
+});
+
+const updateLedgerEntry = z.object({
+  amount: z.coerce.number().positive().optional(),
+  entry_date: z.string().optional(),
+  note: z.string().optional(),
+});
+
+const createInvoice = z.object({
+  customer_id: z.coerce.number().int().positive().optional(),
+  partner_id: z.coerce.number().int().positive(),
+  transaction_id: z.coerce.number().int().positive().optional(),
+  amount: z.coerce.number().positive(),
+  description: z.string().optional(),
 });
 
 const TX_TYPES = ['sale', 'purchase', 'repair', 'exchange'];
@@ -67,6 +91,16 @@ const createTransaction = z.object({
   note: z.string().optional(),
 });
 
+const updateTransaction = z.object({
+  type: z.enum(TX_TYPES).optional(),
+  scissor_type: z.string().min(1).optional(),
+  customer_id: z.coerce.number().int().positive().nullable().optional(),
+  partner_id: z.coerce.number().int().positive().optional(),
+  amount: z.coerce.number().positive().optional(),
+  quantity: z.coerce.number().int().positive().optional(),
+  note: z.string().optional(),
+});
+
 module.exports = {
   login,
   changeOwnPassword,
@@ -74,8 +108,12 @@ module.exports = {
   createPartner,
   updatePartner,
   createCustomer,
+  updateCustomer,
   createCustomerAccount,
   createCustomerPayment,
   createLoan,
+  updateLedgerEntry,
   createTransaction,
+  updateTransaction,
+  createInvoice,
 };

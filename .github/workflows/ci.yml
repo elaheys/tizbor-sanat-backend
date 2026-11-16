@@ -1,0 +1,82 @@
+name: CI
+
+# Runs on every push to main. There's no automated test suite yet (`npm test` is a
+# placeholder), so this catches the two classes of bug that have bitten this project
+# before: a migration that doesn't actually apply cleanly to a fresh database, and a
+# plain JavaScript syntax error that would otherwise only surface the first time someone
+# runs the server.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tizbor_sanat_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tizbor_sanat_ci
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: tizbor_sanat_ci
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      JWT_SECRET: ci-only-secret-not-used-anywhere-real
+      PORT: 4000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax-check every source file
+        run: |
+          for f in $(find src scripts -name '*.js'); do
+            node --check "$f"
+          done
+
+      - name: Apply all migrations to a fresh database
+        run: npm run migrate:up
+
+      - name: Roll back the most recent migration (sanity check that `down` works)
+        run: npm run migrate:down
+
+      - name: Re-apply (leave the database in the fully-migrated state)
+        run: npm run migrate:up
+
+      - name: Boot the server and hit /health
+        run: |
+          node src/index.js &
+          SERVER_PID=$!
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:4000/health; then
+              echo "server is healthy"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy in time"
+          kill $SERVER_PID || true
+          exit 1

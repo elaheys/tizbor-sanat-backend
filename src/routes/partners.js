@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { withTransaction } = require('../db');
 const requireAdmin = require('../middleware/requireAdmin');
 const authLimiter = require('../middleware/authLimiter');
 const validate = require('../middleware/validate');
@@ -25,19 +26,25 @@ router.post('/', requireAdmin, validate(schemas.createPartner), async (req, res)
   try {
     const { name, role, share_percent } = req.body;
 
-    const result = await pool.query(
-      `INSERT INTO partners (name, role, share_percent)
-       VALUES ($1, $2, $3) RETURNING id, name, role, share_percent, is_active`,
-      [name, role || 'partner', share_percent || 0]
-    );
-    const partner = result.rows[0];
+    // both writes must succeed together — a partner with no share-history row would
+    // break every monthly report that looks up their historical share percentage
+    const partner = await withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO partners (name, role, share_percent)
+         VALUES ($1, $2, $3) RETURNING id, name, role, share_percent, is_active`,
+        [name, role || 'partner', share_percent || 0]
+      );
+      const created = result.rows[0];
 
-    // every partner needs a starting point in the share history, even if it's 0%
-    await pool.query(
-      `INSERT INTO partner_share_history (partner_id, share_percent, effective_from)
-       VALUES ($1, $2, CURRENT_DATE)`,
-      [partner.id, partner.share_percent]
-    );
+      // every partner needs a starting point in the share history, even if it's 0%
+      await client.query(
+        `INSERT INTO partner_share_history (partner_id, share_percent, effective_from)
+         VALUES ($1, $2, CURRENT_DATE)`,
+        [created.id, created.share_percent]
+      );
+
+      return created;
+    });
 
     res.status(201).json(partner);
   } catch (err) {
@@ -57,27 +64,34 @@ router.patch('/:id', requireAdmin, validate(schemas.updatePartner), async (req, 
       return res.status(404).json({ error: 'partner not found' });
     }
 
-    const updated = await pool.query(
-      `UPDATE partners SET
-         name = COALESCE($1, name),
-         role = COALESCE($2, role),
-         is_active = COALESCE($3, is_active),
-         share_percent = COALESCE($4, share_percent)
-       WHERE id = $5
-       RETURNING id, name, role, share_percent, is_active`,
-      [name, role, is_active, share_percent, id]
-    );
+    const shareChanged = share_percent != null && Number(share_percent) !== Number(current.rows[0].share_percent);
 
-    // a changed share percentage gets its own dated history row — past months stay
-    // untouched because reports look up the percentage that was valid AT THE TIME,
-    // not whatever the current value is.
-    if (share_percent != null && Number(share_percent) !== Number(current.rows[0].share_percent)) {
-      await pool.query(
-        `INSERT INTO partner_share_history (partner_id, share_percent, effective_from)
-         VALUES ($1, $2, CURRENT_DATE)`,
-        [id, share_percent]
+    const updated = await withTransaction(async (client) => {
+      const result = await client.query(
+        `UPDATE partners SET
+           name = COALESCE($1, name),
+           role = COALESCE($2, role),
+           is_active = COALESCE($3, is_active),
+           share_percent = COALESCE($4, share_percent)
+         WHERE id = $5
+         RETURNING id, name, role, share_percent, is_active`,
+        [name, role, is_active, share_percent, id]
       );
-    }
+
+      // a changed share percentage gets its own dated history row — past months stay
+      // untouched because reports look up the percentage that was valid AT THE TIME,
+      // not whatever the current value is. Same transaction as the update above: a
+      // share change without its history row would silently break past-month reports.
+      if (shareChanged) {
+        await client.query(
+          `INSERT INTO partner_share_history (partner_id, share_percent, effective_from)
+           VALUES ($1, $2, CURRENT_DATE)`,
+          [id, share_percent]
+        );
+      }
+
+      return result;
+    });
 
     res.json(updated.rows[0]);
   } catch (err) {
