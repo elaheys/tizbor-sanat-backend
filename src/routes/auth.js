@@ -39,7 +39,13 @@ router.post('/login', validate(schemas.login), async (req, res) => {
     accountLockout.clearFailures(username);
 
     const token = jwt.sign(
-      { id: partner.id, name: partner.name, username: partner.username, role: partner.role },
+      {
+        id: partner.id,
+        name: partner.name,
+        username: partner.username,
+        role: partner.role,
+        token_version: partner.token_version,
+      },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
     );
@@ -68,11 +74,19 @@ router.patch('/password', requireAuth, validate(schemas.changeOwnPassword), asyn
 
     const currentMatches = await verifyPassword(partner.password_hash, current_password);
     if (!currentMatches) {
-      return res.status(401).json({ error: 'current password is incorrect' });
+      // 400, not 401: this is a wrong-form-input error, not an auth/token problem — the
+      // frontend's axios interceptor treats every 401 as "your session expired" and force
+      // logs the user out, which would hide this message and silently discard the attempt.
+      return res.status(400).json({ error: 'current password is incorrect' });
     }
 
     const newHash = await hashPassword(new_password);
-    await pool.query('UPDATE partners SET password_hash = $1 WHERE id = $2', [newHash, partner.id]);
+    // bumping token_version invalidates every token issued before this moment (other
+    // devices/tabs included) — requireAuth rejects a token whose version doesn't match
+    await pool.query(
+      'UPDATE partners SET password_hash = $1, token_version = token_version + 1 WHERE id = $2',
+      [newHash, partner.id]
+    );
 
     res.json({ ok: true });
   } catch (err) {

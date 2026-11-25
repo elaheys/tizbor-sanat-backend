@@ -14,6 +14,11 @@ const resetPassword = z.object({
   new_password: z.string().min(8, 'new_password must be at least 8 characters'),
 });
 
+const setCredentials = z.object({
+  username: z.string().min(1, 'username is required'),
+  password: z.string().min(8, 'password must be at least 8 characters'),
+});
+
 const ROLES = ['admin', 'partner'];
 
 const createPartner = z.object({
@@ -106,6 +111,7 @@ module.exports = {
   login,
   changeOwnPassword,
   resetPassword,
+  setCredentials,
   createPartner,
   updatePartner,
   createCustomer,
