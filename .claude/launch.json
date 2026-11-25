@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tizbor-front",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["-C", "D:\\work\\tizbor-sanat-front-app", "dev"],
+      "port": 5173
+    }
+  ]
+}

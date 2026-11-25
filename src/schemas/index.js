@@ -89,6 +89,7 @@ const createTransaction = z.object({
   amount: z.coerce.number().positive(),
   quantity: z.coerce.number().int().positive().optional(),
   note: z.string().optional(),
+  created_at: z.coerce.date().optional(),
 });
 
 const updateTransaction = z.object({

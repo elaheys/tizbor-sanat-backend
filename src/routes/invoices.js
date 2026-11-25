@@ -7,10 +7,13 @@ const validate = require('../middleware/validate');
 const idempotent = require('../middleware/idempotency');
 const schemas = require('../schemas');
 
-// GET /api/invoices?customer_id=&partner_id=&from=&to=
+// GET /api/invoices?customer_id=&partner_id=&from=&to=&page=&limit=
+// `page`/`limit` are optional: omit both for the full matching list unchanged (used by
+// InvoiceForm's customer picker etc). Pass both to opt into page-based pagination — the
+// response shape then becomes { data, has_more } instead of a bare array.
 router.get('/', async (req, res) => {
   try {
-    const { customer_id, partner_id, from, to } = req.query;
+    const { customer_id, partner_id, from, to, page, limit } = req.query;
     const conditions = [];
     const values = [];
 
@@ -19,17 +22,30 @@ router.get('/', async (req, res) => {
     if (from) { values.push(from); conditions.push(`i.issued_at >= $${values.length}`); }
     if (to) { values.push(to); conditions.push(`i.issued_at <= $${values.length}`); }
 
+    const pageSize = limit ? parseInt(limit, 10) : null;
+    const pageNum = page ? parseInt(page, 10) : null;
+
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = pageSize ? `LIMIT ${pageSize + 1} OFFSET ${(pageNum - 1) * pageSize}` : '';
+
     const result = await pool.query(
       `SELECT i.*, c.name AS customer_name, p.name AS partner_name
        FROM invoices i
        LEFT JOIN customers c ON c.id = i.customer_id
        JOIN partners p ON p.id = i.partner_id
        ${where}
-       ORDER BY i.issued_at DESC`,
+       ORDER BY i.issued_at DESC, i.id DESC
+       ${limitClause}`,
       values
     );
-    res.json(result.rows);
+
+    if (!pageSize) {
+      return res.json(result.rows);
+    }
+
+    const hasMore = result.rows.length > pageSize;
+    const data = hasMore ? result.rows.slice(0, pageSize) : result.rows;
+    res.json({ data, has_more: hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'something went wrong' });

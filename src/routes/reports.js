@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const { withTransaction } = require('../db');
 const requireAdmin = require('../middleware/requireAdmin');
+const { jalaliMonthRange, jalaliMonthEndDate } = require('../utils/jalaliDate');
 
 // transaction types that bring money IN (sale, repair fee, exchange price-difference)
 const REVENUE_TYPES = ['sale', 'repair', 'exchange'];
@@ -43,31 +44,42 @@ function computeTransfers(diffs) {
   return transfers;
 }
 
-// GET /api/reports/monthly?year=2026&month=8
+// Compares two transfer lists (ignoring order) by {from_partner_id, to_partner_id, amount} —
+// used to tell whether already-generated settlements still match the live computed diff.
+function sameTransferSet(a, b) {
+  if (a.length !== b.length) return false;
+  const key = (t) => `${t.from_partner_id}-${t.to_partner_id}-${Math.round(Number(t.amount))}`;
+  const normalize = (arr) => arr.map(key).sort();
+  const na = normalize(a);
+  const nb = normalize(b);
+  return na.every((v, i) => v === nb[i]);
+}
+
+// GET /api/reports/monthly?year=1405&month=9 — year/month are JALALI.
 router.get('/monthly', async (req, res) => {
   try {
     const year = parseInt(req.query.year, 10);
-    const month = parseInt(req.query.month, 10); // 1-12
+    const month = parseInt(req.query.month, 10); // 1-12, Jalali
     if (!year || !month) {
       return res.status(400).json({ error: 'year and month query params are required' });
     }
+
+    const { start, end } = jalaliMonthRange(year, month);
 
     // 1) company-wide revenue and expense for the month
     const revenueResult = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) AS total
        FROM transactions
        WHERE type = ANY($1)
-         AND EXTRACT(YEAR FROM created_at) = $2
-         AND EXTRACT(MONTH FROM created_at) = $3`,
-      [REVENUE_TYPES, year, month]
+         AND created_at >= $2 AND created_at < $3`,
+      [REVENUE_TYPES, start, end]
     );
     const expenseResult = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) AS total
        FROM transactions
        WHERE type = 'purchase'
-         AND EXTRACT(YEAR FROM created_at) = $1
-         AND EXTRACT(MONTH FROM created_at) = $2`,
-      [year, month]
+         AND created_at >= $1 AND created_at < $2`,
+      [start, end]
     );
 
     const totalRevenue = Number(revenueResult.rows[0].total);
@@ -78,7 +90,7 @@ router.get('/monthly', async (req, res) => {
     const partners = await pool.query("SELECT * FROM partners WHERE role = 'partner' AND is_active = true ORDER BY id");
 
     // last day of the requested month, used to look up each partner's share AS IT WAS THEN
-    const monthEndDate = `${year}-${String(month).padStart(2, '0')}-28`;
+    const monthEndDate = jalaliMonthEndDate(year, month);
 
     // how much cash each partner actually collected this month (revenue minus purchases
     // they personally recorded) — this is what "they are physically holding" right now
@@ -86,9 +98,9 @@ router.get('/monthly', async (req, res) => {
       `SELECT partner_id,
               COALESCE(SUM(CASE WHEN type = ANY($1) THEN amount ELSE -amount END), 0) AS net
        FROM transactions
-       WHERE EXTRACT(YEAR FROM created_at) = $2 AND EXTRACT(MONTH FROM created_at) = $3
+       WHERE created_at >= $2 AND created_at < $3
        GROUP BY partner_id`,
-      [REVENUE_TYPES, year, month]
+      [REVENUE_TYPES, start, end]
     );
     const cashByPartner = new Map(cashCollected.rows.map((r) => [r.partner_id, Number(r.net)]));
 
@@ -170,6 +182,18 @@ router.get('/monthly', async (req, res) => {
       to_partner_name: partners.rows.find((p) => p.id === t.to_partner_id)?.name,
     }));
 
+    // whether settlements were already generated for this month, and whether they still
+    // match the live-computed diff above (a later edit to a transaction can make a prior
+    // generation stale, since needed_transfers is always recomputed from current data)
+    const existingSettlements = await pool.query(
+      `SELECT from_partner_id, to_partner_id, amount FROM partner_ledger
+       WHERE type = 'profit_settlement' AND period_year = $1 AND period_month = $2`,
+      [year, month]
+    );
+    const settlementsGenerated = existingSettlements.rows.length > 0;
+    const settlementsUpToDate =
+      settlementsGenerated && sameTransferSet(existingSettlements.rows, neededTransfers);
+
     res.json({
       year,
       month,
@@ -178,6 +202,8 @@ router.get('/monthly', async (req, res) => {
       profit,
       partners: breakdown,
       needed_transfers: neededTransfers,
+      settlements_generated: settlementsGenerated,
+      settlements_up_to_date: settlementsUpToDate,
     });
   } catch (err) {
     console.error(err);
@@ -206,7 +232,7 @@ router.patch('/monthly/:partnerId/settle', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/reports/monthly/:year/:month/settlements (admin only)
+// POST /api/reports/monthly/:year/:month/settlements (admin only) — year/month are JALALI.
 // Turns that month's cash-vs-share imbalance into real, settleable partner_ledger rows.
 // Idempotent: calling it again for a month that was already generated just returns the
 // existing rows instead of creating duplicates.
@@ -217,6 +243,8 @@ router.post('/monthly/:year/:month/settlements', requireAdmin, async (req, res) 
     if (!year || !month) {
       return res.status(400).json({ error: 'invalid year/month' });
     }
+
+    const { start, end } = jalaliMonthRange(year, month);
 
     // The whole read-compute-insert sequence runs in one SERIALIZABLE transaction: if two
     // requests for the same month somehow overlap (e.g. a double-click without an
@@ -240,29 +268,29 @@ router.post('/monthly/:year/:month/settlements', requireAdmin, async (req, res) 
       const totalRevenue = Number(
         (await client.query(
           `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
-           WHERE type = ANY($1) AND EXTRACT(YEAR FROM created_at) = $2 AND EXTRACT(MONTH FROM created_at) = $3`,
-          [REVENUE_TYPES, year, month]
+           WHERE type = ANY($1) AND created_at >= $2 AND created_at < $3`,
+          [REVENUE_TYPES, start, end]
         )).rows[0].total
       );
       const totalExpense = Number(
         (await client.query(
           `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
-           WHERE type = 'purchase' AND EXTRACT(YEAR FROM created_at) = $1 AND EXTRACT(MONTH FROM created_at) = $2`,
-          [year, month]
+           WHERE type = 'purchase' AND created_at >= $1 AND created_at < $2`,
+          [start, end]
         )).rows[0].total
       );
       const profit = totalRevenue - totalExpense;
 
       const partners = await client.query("SELECT * FROM partners WHERE role = 'partner' AND is_active = true ORDER BY id");
-      const monthEndDate = `${year}-${String(month).padStart(2, '0')}-28`;
+      const monthEndDate = jalaliMonthEndDate(year, month);
 
       const cashCollected = await client.query(
         `SELECT partner_id,
                 COALESCE(SUM(CASE WHEN type = ANY($1) THEN amount ELSE -amount END), 0) AS net
          FROM transactions
-         WHERE EXTRACT(YEAR FROM created_at) = $2 AND EXTRACT(MONTH FROM created_at) = $3
+         WHERE created_at >= $2 AND created_at < $3
          GROUP BY partner_id`,
-        [REVENUE_TYPES, year, month]
+        [REVENUE_TYPES, start, end]
       );
       const cashByPartner = new Map(cashCollected.rows.map((r) => [r.partner_id, Number(r.net)]));
 
@@ -304,7 +332,7 @@ router.post('/monthly/:year/:month/settlements', requireAdmin, async (req, res) 
   }
 });
 
-// GET /api/reports/transactions-summary?year=&month=  (or ?from=&to=)
+// GET /api/reports/transactions-summary?year=&month=  (JALALI, or ?from=&to= as literal dates)
 // Count + total amount per transaction type — the "transactions broken down by type" detail on the report page.
 router.get('/transactions-summary', async (req, res) => {
   try {
@@ -313,9 +341,10 @@ router.get('/transactions-summary', async (req, res) => {
     const values = [];
 
     if (year && month) {
-      values.push(Number(year), Number(month));
-      conditions.push(`EXTRACT(YEAR FROM created_at) = $${values.length - 1}`);
-      conditions.push(`EXTRACT(MONTH FROM created_at) = $${values.length}`);
+      const { start, end } = jalaliMonthRange(Number(year), Number(month));
+      values.push(start, end);
+      conditions.push(`created_at >= $${values.length - 1}`);
+      conditions.push(`created_at < $${values.length}`);
     } else {
       if (from) { values.push(from); conditions.push(`created_at >= $${values.length}`); }
       if (to) { values.push(to); conditions.push(`created_at <= $${values.length}`); }

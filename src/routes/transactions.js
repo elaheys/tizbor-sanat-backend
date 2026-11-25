@@ -6,10 +6,14 @@ const validate = require('../middleware/validate');
 const idempotent = require('../middleware/idempotency');
 const schemas = require('../schemas');
 
-// GET /api/transactions?partner_id=&type=&from=&to=
+// GET /api/transactions?partner_id=&type=&from=&to=&page=&limit=
+// `page`/`limit` are optional: omit both to get the full matching list unchanged (used by
+// the dashboard's "recent transactions" and other non-paginated callers). Pass both to opt
+// into page-based pagination — the response shape then becomes { data, has_more } instead
+// of a bare array.
 router.get('/', async (req, res) => {
   try {
-    const { partner_id, type, from, to } = req.query;
+    const { partner_id, type, from, to, page, limit } = req.query;
     const conditions = [];
     const values = [];
 
@@ -18,7 +22,11 @@ router.get('/', async (req, res) => {
     if (from) { values.push(from); conditions.push(`created_at >= $${values.length}`); }
     if (to) { values.push(to); conditions.push(`created_at <= $${values.length}`); }
 
+    const pageSize = limit ? parseInt(limit, 10) : null;
+    const pageNum = page ? parseInt(page, 10) : null;
+
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = pageSize ? `LIMIT ${pageSize + 1} OFFSET ${(pageNum - 1) * pageSize}` : '';
 
     const result = await pool.query(
       `SELECT t.*, c.name AS customer_name, p.name AS partner_name
@@ -26,10 +34,18 @@ router.get('/', async (req, res) => {
        LEFT JOIN customers c ON c.id = t.customer_id
        JOIN partners p ON p.id = t.partner_id
        ${where}
-       ORDER BY t.created_at DESC`,
+       ORDER BY t.created_at DESC, t.id DESC
+       ${limitClause}`,
       values
     );
-    res.json(result.rows);
+
+    if (!pageSize) {
+      return res.json(result.rows);
+    }
+
+    const hasMore = result.rows.length > pageSize;
+    const data = hasMore ? result.rows.slice(0, pageSize) : result.rows;
+    res.json({ data, has_more: hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'something went wrong' });
@@ -39,12 +55,13 @@ router.get('/', async (req, res) => {
 // POST /api/transactions (admin only — partners are view-only)
 router.post('/', requireAdmin, idempotent, validate(schemas.createTransaction), async (req, res) => {
   try {
-    const { type, scissor_type, customer_id, partner_id, amount, quantity, note } = req.body;
+    const { type, scissor_type, customer_id, partner_id, amount, quantity, note, created_at } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO transactions (type, scissor_type, customer_id, partner_id, amount, quantity, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [type, scissor_type, customer_id || null, partner_id, amount, quantity || 1, note || null]
+      `INSERT INTO transactions (type, scissor_type, customer_id, partner_id, amount, quantity, note, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))
+       RETURNING *`,
+      [type, scissor_type, customer_id || null, partner_id, amount, quantity || 1, note || null, created_at || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

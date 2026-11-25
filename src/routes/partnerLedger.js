@@ -53,15 +53,22 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/partner-ledger/history?from=&to= — settled rows only, filtered by settlement date.
+// GET /api/partner-ledger/history?from=&to=&page=&limit= — settled rows only, filtered by
+// settlement date. `page`/`limit` are optional: omit both for the full list unchanged. Pass
+// both to opt into page-based pagination — response shape becomes { data, has_more }.
 router.get('/history', async (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, page, limit } = req.query;
     const conditions = [`pl.is_settled = true`];
     const values = [];
 
     if (from) { values.push(from); conditions.push(`pl.settled_at >= $${values.length}`); }
     if (to) { values.push(to); conditions.push(`pl.settled_at <= $${values.length}`); }
+
+    const pageSize = limit ? parseInt(limit, 10) : null;
+    const pageNum = page ? parseInt(page, 10) : null;
+
+    const limitClause = pageSize ? `LIMIT ${pageSize + 1} OFFSET ${(pageNum - 1) * pageSize}` : '';
 
     const result = await pool.query(
       `SELECT pl.*, fp.name AS from_partner_name, tp.name AS to_partner_name
@@ -69,10 +76,18 @@ router.get('/history', async (req, res) => {
        JOIN partners fp ON fp.id = pl.from_partner_id
        JOIN partners tp ON tp.id = pl.to_partner_id
        WHERE ${conditions.join(' AND ')}
-       ORDER BY pl.settled_at DESC`,
+       ORDER BY pl.settled_at DESC, pl.id DESC
+       ${limitClause}`,
       values
     );
-    res.json(result.rows);
+
+    if (!pageSize) {
+      return res.json(result.rows);
+    }
+
+    const hasMore = result.rows.length > pageSize;
+    const data = hasMore ? result.rows.slice(0, pageSize) : result.rows;
+    res.json({ data, has_more: hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'something went wrong' });

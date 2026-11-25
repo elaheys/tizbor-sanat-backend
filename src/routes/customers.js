@@ -5,14 +5,36 @@ const requireAdmin = require('../middleware/requireAdmin');
 const validate = require('../middleware/validate');
 const schemas = require('../schemas');
 
-// GET /api/customers?q=search
+// GET /api/customers?q=search&page=&limit=
+// Always alphabetical by name. `page`/`limit` are optional: omit both for the full matching
+// list unchanged (used by InvoiceForm's and CustomerCombobox's pickers). Pass both to opt
+// into page-based pagination — response shape then becomes { data, has_more }.
 router.get('/', async (req, res) => {
   try {
-    const { q } = req.query;
-    const result = q
-      ? await pool.query('SELECT * FROM customers WHERE name ILIKE $1 ORDER BY name', [`%${q}%`])
-      : await pool.query('SELECT * FROM customers ORDER BY name');
-    res.json(result.rows);
+    const { q, page, limit } = req.query;
+    const conditions = [];
+    const values = [];
+
+    if (q) { values.push(`%${q}%`); conditions.push(`name ILIKE $${values.length}`); }
+
+    const pageSize = limit ? parseInt(limit, 10) : null;
+    const pageNum = page ? parseInt(page, 10) : null;
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = pageSize ? `LIMIT ${pageSize + 1} OFFSET ${(pageNum - 1) * pageSize}` : '';
+
+    const result = await pool.query(
+      `SELECT * FROM customers ${where} ORDER BY name ASC, id ASC ${limitClause}`,
+      values
+    );
+
+    if (!pageSize) {
+      return res.json(result.rows);
+    }
+
+    const hasMore = result.rows.length > pageSize;
+    const data = hasMore ? result.rows.slice(0, pageSize) : result.rows;
+    res.json({ data, has_more: hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'something went wrong' });
